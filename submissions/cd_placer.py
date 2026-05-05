@@ -103,8 +103,8 @@ class CDPlacer:
         best_pos = pos.copy()
         best_cost = current_cost
 
-        T_start = max(cw, ch) * 0.15
-        T_end = max(cw, ch) * 0.001
+        T_start = max(cw, ch) * 0.20
+        T_end = max(cw, ch) * 0.0008
 
         for step in range(self.refine_iters):
             frac = step / self.refine_iters
