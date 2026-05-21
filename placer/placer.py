@@ -100,7 +100,7 @@ class SANetPlacer:
             wl = wl_cost()
             dc = self._density_cost(pos, sizes, cw, ch, n)
             # Weight congestion heavily — it dominates the proxy
-            return wl * 0.1 + dc * 0.9
+            return wl * 0.05 + dc * 0.98
 
         def check_single_overlap(idx):
             gap = 0.05
