@@ -5,23 +5,6 @@ from pathlib import Path
 from macro_place.benchmark import Benchmark
 
 
-def _load_plc(name):
-    from macro_place.loader import load_benchmark_from_dir, load_benchmark
-    root = Path("external/MacroPlacement/Testcases/ICCAD04") / name
-    if root.exists():
-        _, plc = load_benchmark_from_dir(str(root))
-        return plc
-    ng45 = {"ariane133": "ariane133", "ariane136": "ariane136",
-            "nvdla": "nvdla", "mempool_tile": "mempool_tile"}
-    d = ng45.get(name)
-    if d:
-        base = Path("external/MacroPlacement/Flows/NanGate45") / d / "netlist" / "output_CT_Grouping"
-        if (base / "netlist.pb.txt").exists():
-            _, plc = load_benchmark(str(base / "netlist.pb.txt"), str(base / "initial.plc"))
-            return plc
-    return None
-
-
 def _build_edges_from_net_nodes(benchmark):
     n_hard = benchmark.num_hard_macros
     edge_dict = {}
@@ -41,7 +24,13 @@ def _build_edges_from_net_nodes(benchmark):
     return edges, weights
 
 
-class CDPlacer:
+class SANetPlacer:
+    """
+    Congestion-aware SA placer.
+    Key insight: proxy cost = 0.5*wl + 0.5*cong (roughly).
+    Congestion dominates (cong=1.8-2.7 vs wl=0.05-0.08).
+    Strategy: spread macros to reduce local density hotspots.
+    """
     def __init__(self, seed=42, refine_iters=3000):
         self.seed = seed
         self.refine_iters = refine_iters
@@ -72,6 +61,22 @@ class CDPlacer:
         full_pos[:n_hard] = torch.tensor(pos, dtype=torch.float32)
         return full_pos
 
+    def _density_cost(self, pos, sizes, cw, ch, n, grid=8):
+        """Estimate congestion via macro density on a coarse grid."""
+        cell_w = cw / grid
+        cell_h = ch / grid
+        density = np.zeros((grid, grid))
+        for i in range(n):
+            gx = int(np.clip(pos[i, 0] / cell_w, 0, grid - 1))
+            gy = int(np.clip(pos[i, 1] / cell_h, 0, grid - 1))
+            area = sizes[i, 0] * sizes[i, 1]
+            density[gx, gy] += area
+        cell_area = cell_w * cell_h
+        util = density / cell_area
+        # Penalize over-utilization (util > 0.8 is congested)
+        penalty = np.maximum(0, util - 0.5) ** 2
+        return penalty.sum()
+
     def _sa_refine(self, pos, edges, edge_weights, movable, sizes, half_w, half_h, cw, ch, n):
         movable_idx = np.where(movable)[0]
         if len(movable_idx) == 0:
@@ -91,6 +96,12 @@ class CDPlacer:
             dy = np.abs(pos[edges[:, 0], 1] - pos[edges[:, 1], 1])
             return (edge_weights * (dx + dy)).sum()
 
+        def combined_cost():
+            wl = wl_cost()
+            dc = self._density_cost(pos, sizes, cw, ch, n)
+            # Weight congestion heavily — it dominates the proxy
+            return wl * 0.1 + dc * 0.9
+
         def check_single_overlap(idx):
             gap = 0.05
             dx = np.abs(pos[idx, 0] - pos[:, 0])
@@ -99,7 +110,7 @@ class CDPlacer:
             overlaps[idx] = False
             return overlaps.any()
 
-        current_cost = wl_cost()
+        current_cost = combined_cost()
         best_pos = pos.copy()
         best_cost = current_cost
 
@@ -134,7 +145,7 @@ class CDPlacer:
                         pos[i, 0] = old_x; pos[i, 1] = old_y
                         pos[j, 0] = old_jx; pos[j, 1] = old_jy
                         continue
-                    new_cost = wl_cost()
+                    new_cost = combined_cost()
                     delta = new_cost - current_cost
                     if delta < 0 or random.random() < math.exp(-delta / max(T, 1e-10)):
                         current_cost = new_cost
@@ -155,7 +166,7 @@ class CDPlacer:
                 pos[i, 0] = old_x; pos[i, 1] = old_y
                 continue
 
-            new_cost = wl_cost()
+            new_cost = combined_cost()
             delta = new_cost - current_cost
             if delta < 0 or random.random() < math.exp(-delta / max(T, 1e-10)):
                 current_cost = new_cost
